@@ -1,0 +1,1 @@
+A FastAPI + Celery service that copies data between databases (verified: MySQL → PostgreSQL, SQLite → SQLite) with configurable column transforms, PII masking, automatic MySQL→PostgreSQL type coercion, a dry-run preview, conflict strategies, chunked batching, and live progress tracking.
