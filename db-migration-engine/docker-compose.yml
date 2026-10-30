@@ -1,0 +1,127 @@
+services:
+  # ── Internal app DB (stores configs, runs, audit logs) ─────────────
+  postgres_internal:
+    image: postgres:15-alpine
+    container_name: migration_postgres_internal
+    environment:
+      POSTGRES_USER: migrator
+      POSTGRES_PASSWORD: migrator123
+      POSTGRES_DB: migrationdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - migration_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U migrator -d migrationdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Demo SOURCE database (MySQL, seeded with sample data) ──────────
+  mysql_source:
+    image: mysql:8.0
+    container_name: migration_mysql_source
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: source_db
+      MYSQL_USER: sourceuser
+      MYSQL_PASSWORD: source123
+    ports:
+      - "3306:3306"
+    volumes:
+      - migration_mysqldata:/var/lib/mysql
+      - ./docker/mysql-seed.sql:/docker-entrypoint-initdb.d/seed.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # ── Demo TARGET database (PostgreSQL, schema pre-created) ──────────
+  postgres_target:
+    image: postgres:15-alpine
+    container_name: migration_postgres_target
+    environment:
+      POSTGRES_USER: targetuser
+      POSTGRES_PASSWORD: target123
+      POSTGRES_DB: target_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - migration_pg_target:/var/lib/postgresql/data
+      - ./docker/pg-target-schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U targetuser -d target_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis (Celery broker + result backend) ─────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: migration_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── FastAPI app ────────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: migration_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # Inside the compose network, services are reached by service name
+      DATABASE_URL: postgresql://migrator:migrator123@postgres_internal:5432/migrationdb
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - .:/app
+    depends_on:
+      postgres_internal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Celery worker ──────────────────────────────────────────────────
+  worker:
+    build: .
+    container_name: migration_worker
+    command: celery -A app.tasks.celery_app worker --loglevel=info -Q migrations -c 3
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://migrator:migrator123@postgres_internal:5432/migrationdb
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    volumes:
+      - .:/app
+    depends_on:
+      postgres_internal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Flower (Celery monitor) ────────────────────────────────────────
+  flower:
+    build: .
+    container_name: migration_flower
+    command: celery -A app.tasks.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    env_file: .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      - redis
+
+volumes:
+  migration_pgdata:
+  migration_mysqldata:
+  migration_pg_target:
